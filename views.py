@@ -1,101 +1,91 @@
-from django.shortcuts import render
-from .models import UserPrediction
-import torch
-import pickle
-import numpy as np
-from torch_geometric.data import Data
-from torch_geometric.utils import dense_to_sparse
-import torch.nn as nn
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv
+from django.shortcuts import render, redirect
+from django.contrib.auth.models import User
+from django.contrib.auth import authenticate, login, logout
+from django.contrib import messages
 
-# Create your views here.
-def userhome(request):
-    user = request.user
-    return render(request, 'User/userhome.html', {'user': user})
+def index(request):
+    return render(request, "index.html")
 
-# Define Graph-based Regression Model with Attention
-class A_SRGCNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(A_SRGCNN, self).__init__()
-        self.conv1 = GCNConv(input_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.fc = nn.Linear(hidden_dim, output_dim)
-        self.attention = nn.Linear(hidden_dim, 1)
+def login_page(request):
+    return render(request, "login.html")
 
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
-        x = F.relu(self.conv1(x, edge_index))
-        attn_weights = torch.sigmoid(self.attention(x))
-        x = attn_weights * x  # Applying attention
-        x = F.relu(self.conv2(x, edge_index))
-        x = self.fc(x)
-        return x
+def register_page(request):
+    return render(request, "register.html")
 
-# Load encoders and scaler
-with open("model/label_encoders.pkl", "rb") as f:
-    label_encoders = pickle.load(f)
-
-with open("model/scaler.pkl", "rb") as f:
-    scaler = pickle.load(f)
-
-# Load trained model
-input_dim = len(scaler.mean_)  # Get number of input features
-model = A_SRGCNN(input_dim=input_dim, hidden_dim=64, output_dim=1)
-model.load_state_dict(torch.load("model/ASRGCNN_model.pth"))
-model.eval()
-
-def predict(input_data):
-    """Function to predict house price given custom input"""
-    input_data_scaled = scaler.transform(input_data)
-    input_tensor = torch.tensor(input_data_scaled, dtype=torch.float32)
-
-    # Create a self-looping adjacency matrix for the single input
-    input_adj_matrix = torch.ones((1, 1))
-    input_edge_index, _ = dense_to_sparse(input_adj_matrix)
-
-    input_data_obj = Data(x=input_tensor, edge_index=input_edge_index)
-
-    with torch.no_grad():
-        prediction = model(input_data_obj)
-
-    return prediction.item()
-
-def userpredict(request):
+# Define the login function
+def user_login(request):
     if request.method == "POST":
-        # Maintain the correct feature order
-        feature_order = [
-            'area', 'bedrooms', 'bathrooms', 'stories',
-            'mainroad', 'guestroom', 'basement', 'hotwaterheating',
-            'airconditioning', 'parking', 'prefarea', 'furnishingstatus'
-        ]
+        username = request.POST.get('username')
+        password = request.POST.get('password')
 
-        input_data = []
-        user_inputs = {}
+        # Authenticate user
+        user = authenticate(request, username=username, password=password)
 
-        for feature in feature_order:
-            value = request.POST.get(feature, "")
-            user_inputs[feature] = value
+        if user is not None:
+            if not user.is_active:
+                # User is inactive
+                messages.error(request, "Your account is inactive. Please contact the admin.")
+                return redirect('login_page')
 
-            if feature in label_encoders:
-                if value in label_encoders[feature].classes_:
-                    encoded_value = label_encoders[feature].transform([value])[0]
-                else:
-                    encoded_value = 0  # Default encoding if value not found
+            # Login the user
+            login(request, user)
+
+            if user.is_staff or user.is_superuser:
+                # Redirect to admin home if user is staff
+                return redirect('adminhome')
             else:
-                try:
-                    encoded_value = float(value)
-                except ValueError:
-                    encoded_value = 0  # Default for invalid numeric input
+                # Redirect to user home if user is not staff
+                return redirect('userhome')
+        else:
+            # Invalid username or password
+            messages.error(request, "Invalid username or password.")
+            return redirect('login_page')
 
-            input_data.append(encoded_value)
+    return render(request, 'login.html')
 
-        input_data = np.array(input_data).reshape(1, -1)
-        predicted_price = predict(input_data)
+# Define the user registration function
+def user_registration(request):
+    if request.method == "POST":
+        username = request.POST.get('username')
+        email = request.POST.get('email')
+        password = request.POST.get('password')
+        confirm_password = request.POST.get('confirm_password')
+        first_name = request.POST.get('first_name')
+        last_name = request.POST.get('last_name')
 
-        # Save to database
-        UserPrediction.objects.create(user_input=user_inputs, predicted_price=predicted_price)
+        # Check if passwords match
+        if password != confirm_password:
+            messages.error(request, "Passwords do not match.")
+            return redirect('register_page')
 
-        return render(request, 'User/userpredict.html', {'predicted_price': predicted_price})
+        # Check if username already exists
+        if User.objects.filter(username=username).exists():
+            messages.error(request, "Username already exists.")
+            return redirect('register_page')
 
-    return render(request, 'User/userpredict.html')
+        # Check if email already exists
+        if User.objects.filter(email=email).exists():
+            messages.error(request, "Email already exists.")
+            return redirect('register_page')
+
+        # Create the user with is_active set to False
+        user = User.objects.create_user(
+            username=username,
+            email=email,
+            password=password,
+            first_name=first_name,
+            last_name=last_name
+        )
+        user.is_active = False  # Set is_active to False by default
+        user.save()
+
+        messages.success(request, "Registration successful! Please wait for admin approval.")
+        return redirect('login_page')
+
+    return render(request, 'register.html')
+
+# Define the logout function
+def user_logout(request):
+    logout(request)
+    messages.success(request, "You have been logged out successfully.")
+    return redirect('login_page')
